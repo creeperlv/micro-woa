@@ -88,6 +88,10 @@ func BindKey(k, v string, bind func(e Event, a string)) {
 		return
 	}
 
+	if strings.HasPrefix(k, "\x1b") {
+		screen.Screen.RegisterRawSeq(k)
+	}
+
 	bind(event, v)
 
 	// switch e := event.(type) {
@@ -153,7 +157,6 @@ modSearch:
 			k = k[5:]
 			modifiers |= tcell.ModShift
 		case strings.HasPrefix(k, "\x1b"):
-			screen.Screen.RegisterRawSeq(k)
 			return RawEvent{
 				esc: k,
 			}, true
@@ -201,11 +204,20 @@ modSearch:
 		}, true
 	}
 
+	var mstate MouseState = MousePress
+	if strings.HasSuffix(k, "Drag") {
+		k = k[:len(k)-4]
+		mstate = MouseDrag
+	} else if strings.HasSuffix(k, "Release") {
+		k = k[:len(k)-7]
+		mstate = MouseRelease
+	}
 	// See if we can find the key in bindingMouse
 	if code, ok := mouseEvents[k]; ok {
 		return MouseEvent{
-			btn: code,
-			mod: modifiers,
+			btn:   code,
+			mod:   modifiers,
+			state: mstate,
 		}, true
 	}
 
@@ -320,6 +332,10 @@ func UnbindKey(k string) error {
 					break
 				}
 			}
+		}
+
+		if strings.HasPrefix(k, "\x1b") {
+			screen.Screen.UnregisterRawSeq(k)
 		}
 
 		defaults := DefaultBindings("buffer")
