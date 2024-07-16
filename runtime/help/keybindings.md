@@ -178,12 +178,18 @@ SelectToStartOfText
 SelectToStartOfTextToggle
 WordRight
 WordLeft
+SubWordRight
+SubWordLeft
 SelectWordRight
 SelectWordLeft
+SelectSubWordRight
+SelectSubWordLeft
 MoveLinesUp
 MoveLinesDown
 DeleteWordRight
 DeleteWordLeft
+DeleteSubWordRight
+DeleteSubWordLeft
 SelectLine
 SelectToStartOfLine
 SelectToEndOfLine
@@ -235,6 +241,7 @@ ToggleHelp
 ToggleDiffGutter
 ToggleRuler
 JumpLine
+ResetSearch
 ClearStatus
 ShellMode
 CommandMode

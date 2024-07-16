@@ -113,7 +113,7 @@ func (h *BufPane) MouseDrag(e *tcell.EventMouse) bool {
 	} else if h.doubleClick {
 		h.Cursor.AddWordToSelection()
 	} else {
-		h.Cursor.SetSelectionEnd(h.Cursor.Loc)
+		h.Cursor.SelectTo(h.Cursor.Loc)
 	}
 
 	h.Cursor.StoreVisualX()
@@ -209,7 +209,7 @@ func (h *BufPane) CursorUp() bool {
 
 // CursorDown moves the cursor down
 func (h *BufPane) CursorDown() bool {
-	h.Cursor.Deselect(true)
+	h.Cursor.Deselect(false)
 	h.MoveCursorDown(1)
 	h.Relocate()
 	return true
@@ -279,6 +279,22 @@ func (h *BufPane) WordRight() bool {
 func (h *BufPane) WordLeft() bool {
 	h.Cursor.Deselect(true)
 	h.Cursor.WordLeft()
+	h.Relocate()
+	return true
+}
+
+// SubWordRight moves the cursor one sub-word to the right
+func (h *BufPane) SubWordRight() bool {
+	h.Cursor.Deselect(false)
+	h.Cursor.SubWordRight()
+	h.Relocate()
+	return true
+}
+
+// SubWordLeft moves the cursor one sub-word to the left
+func (h *BufPane) SubWordLeft() bool {
+	h.Cursor.Deselect(true)
+	h.Cursor.SubWordLeft()
 	h.Relocate()
 	return true
 }
@@ -354,6 +370,28 @@ func (h *BufPane) SelectWordLeft() bool {
 		h.Cursor.OrigSelection[0] = h.Cursor.Loc
 	}
 	h.Cursor.WordLeft()
+	h.Cursor.SelectTo(h.Cursor.Loc)
+	h.Relocate()
+	return true
+}
+
+// SelectSubWordRight selects the sub-word to the right of the cursor
+func (h *BufPane) SelectSubWordRight() bool {
+	if !h.Cursor.HasSelection() {
+		h.Cursor.OrigSelection[0] = h.Cursor.Loc
+	}
+	h.Cursor.SubWordRight()
+	h.Cursor.SelectTo(h.Cursor.Loc)
+	h.Relocate()
+	return true
+}
+
+// SelectSubWordLeft selects the sub-word to the left of the cursor
+func (h *BufPane) SelectSubWordLeft() bool {
+	if !h.Cursor.HasSelection() {
+		h.Cursor.OrigSelection[0] = h.Cursor.Loc
+	}
+	h.Cursor.SubWordLeft()
 	h.Cursor.SelectTo(h.Cursor.Loc)
 	h.Relocate()
 	return true
@@ -622,6 +660,28 @@ func (h *BufPane) DeleteWordLeft() bool {
 	return true
 }
 
+// DeleteSubWordRight deletes the sub-word to the right of the cursor
+func (h *BufPane) DeleteSubWordRight() bool {
+	h.SelectSubWordRight()
+	if h.Cursor.HasSelection() {
+		h.Cursor.DeleteSelection()
+		h.Cursor.ResetSelection()
+	}
+	h.Relocate()
+	return true
+}
+
+// DeleteSubWordLeft deletes the sub-word to the left of the cursor
+func (h *BufPane) DeleteSubWordLeft() bool {
+	h.SelectSubWordLeft()
+	if h.Cursor.HasSelection() {
+		h.Cursor.DeleteSelection()
+		h.Cursor.ResetSelection()
+	}
+	h.Relocate()
+	return true
+}
+
 // Delete deletes the next character
 func (h *BufPane) Delete() bool {
 	if h.Cursor.HasSelection() {
@@ -745,8 +805,8 @@ func (h *BufPane) Autocomplete() bool {
 	}
 	r := h.Cursor.RuneUnder(h.Cursor.X)
 	prev := h.Cursor.RuneUnder(h.Cursor.X - 1)
-	if !util.IsAutocomplete(prev) || !util.IsNonAlphaNumeric(r) {
-		// don't autocomplete if cursor is on alpha numeric character (middle of a word)
+	if !util.IsAutocomplete(prev) || util.IsWordChar(r) {
+		// don't autocomplete if cursor is within a word
 		return false
 	}
 
@@ -1012,8 +1072,20 @@ func (h *BufPane) UnhighlightSearch() bool {
 	return true
 }
 
+// ResetSearch resets the last used search term
+func (h *BufPane) ResetSearch() bool {
+	if h.Buf.LastSearch != "" {
+		h.Buf.LastSearch = ""
+		return true
+	}
+	return false
+}
+
 // FindNext searches forwards for the last used search term
 func (h *BufPane) FindNext() bool {
+	if h.Buf.LastSearch == "" {
+		return false
+	}
 	// If the cursor is at the start of a selection and we search we want
 	// to search from the end of the selection in the case that
 	// the selection is a search result in which case we wouldn't move at
@@ -1040,6 +1112,9 @@ func (h *BufPane) FindNext() bool {
 
 // FindPrevious searches backwards for the last used search term
 func (h *BufPane) FindPrevious() bool {
+	if h.Buf.LastSearch == "" {
+		return false
+	}
 	// If the cursor is at the end of a selection and we search we want
 	// to search from the beginning of the selection in the case that
 	// the selection is a search result in which case we wouldn't move at
@@ -1334,21 +1409,15 @@ func (h *BufPane) paste(clip string) {
 // JumpToMatchingBrace moves the cursor to the matching brace if it is
 // currently on a brace
 func (h *BufPane) JumpToMatchingBrace() bool {
-	for _, bp := range buffer.BracePairs {
-		r := h.Cursor.RuneUnder(h.Cursor.X)
-		rl := h.Cursor.RuneUnder(h.Cursor.X - 1)
-		if r == bp[0] || r == bp[1] || rl == bp[0] || rl == bp[1] {
-			matchingBrace, left, found := h.Buf.FindMatchingBrace(bp, h.Cursor.Loc)
-			if found {
-				if left {
-					h.Cursor.GotoLoc(matchingBrace)
-				} else {
-					h.Cursor.GotoLoc(matchingBrace.Move(1, h.Buf))
-				}
-				h.Relocate()
-				return true
-			}
+	matchingBrace, left, found := h.Buf.FindMatchingBrace(h.Cursor.Loc)
+	if found {
+		if left {
+			h.Cursor.GotoLoc(matchingBrace)
+		} else {
+			h.Cursor.GotoLoc(matchingBrace.Move(1, h.Buf))
 		}
+		h.Relocate()
+		return true
 	}
 	return false
 }
@@ -1480,9 +1549,7 @@ func (h *BufPane) HalfPageDown() bool {
 func (h *BufPane) ToggleDiffGutter() bool {
 	if !h.Buf.Settings["diffgutter"].(bool) {
 		h.Buf.Settings["diffgutter"] = true
-		h.Buf.UpdateDiff(func(synchronous bool) {
-			screen.Redraw()
-		})
+		h.Buf.UpdateDiff()
 		InfoBar.Message("Enabled diff gutter")
 	} else {
 		h.Buf.Settings["diffgutter"] = false
