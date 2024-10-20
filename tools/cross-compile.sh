@@ -105,6 +105,10 @@ create_artefact_generic "freebsd32"
 echo "Windows 64"
 GOOS=windows GOARCH=amd64 make build
 create_artefact_windows "win64"
+# Windows
+echo "Windows Arm64"
+GOOS=windows GOARCH=arm64 make build
+create_artefact_windows "winarm64"
 
 echo "Windows 32"
 GOOS=windows GOARCH=386 make build
