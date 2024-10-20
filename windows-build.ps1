@@ -1,0 +1,2 @@
+$env:VERSION=$(go run tools/build-version.go)
+go build -trimpath -ldflags "-s -w -X github.com/zyedidia/micro/v2/internal/util.Version=$env:VERSION -X github.com/zyedidia/micro/v2/internal/util.CommitHash=$env:VERSION -X 'github.com/zyedidia/micro/v2/internal/util.CompileDate=$env:VERSION'"  ./cmd/micro

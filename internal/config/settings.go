@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -18,6 +19,120 @@ import (
 )
 
 type optionValidator func(string, interface{}) error
+
+// a list of settings that need option validators
+var optionValidators = map[string]optionValidator{
+	"autosave":        validateNonNegativeValue,
+	"clipboard":       validateChoice,
+	"colorcolumn":     validateNonNegativeValue,
+	"colorscheme":     validateColorscheme,
+	"detectlimit":     validateNonNegativeValue,
+	"encoding":        validateEncoding,
+	"fileformat":      validateChoice,
+	"helpsplit":       validateChoice,
+	"matchbracestyle": validateChoice,
+	"multiopen":       validateChoice,
+	"reload":          validateChoice,
+	"scrollmargin":    validateNonNegativeValue,
+	"scrollspeed":     validateNonNegativeValue,
+	"tabsize":         validatePositiveValue,
+}
+
+// a list of settings with pre-defined choices
+var OptionChoices = map[string][]string{
+	"clipboard":       {"internal", "external", "terminal"},
+	"fileformat":      {"unix", "dos"},
+	"helpsplit":       {"hsplit", "vsplit"},
+	"matchbracestyle": {"underline", "highlight"},
+	"multiopen":       {"tab", "hsplit", "vsplit"},
+	"reload":          {"prompt", "auto", "disabled"},
+}
+
+// a list of settings that can be globally and locally modified and their
+// default values
+var defaultCommonSettings = map[string]interface{}{
+	"autoindent":      true,
+	"autosu":          false,
+	"backup":          true,
+	"backupdir":       "",
+	"basename":        false,
+	"colorcolumn":     float64(0),
+	"cursorline":      true,
+	"detectlimit":     float64(100),
+	"diffgutter":      false,
+	"encoding":        "utf-8",
+	"eofnewline":      true,
+	"fastdirty":       false,
+	"fileformat":      defaultFileFormat(),
+	"filetype":        "unknown",
+	"hlsearch":        false,
+	"hltaberrors":     false,
+	"hltrailingws":    false,
+	"incsearch":       true,
+	"ignorecase":      true,
+	"indentchar":      " ",
+	"keepautoindent":  false,
+	"matchbrace":      true,
+	"matchbraceleft":  true,
+	"matchbracestyle": "underline",
+	"mkparents":       false,
+	"permbackup":      false,
+	"readonly":        false,
+	"reload":          "prompt",
+	"rmtrailingws":    false,
+	"ruler":           true,
+	"relativeruler":   false,
+	"savecursor":      false,
+	"saveundo":        false,
+	"scrollbar":       false,
+	"scrollmargin":    float64(3),
+	"scrollspeed":     float64(2),
+	"smartpaste":      true,
+	"softwrap":        false,
+	"splitbottom":     true,
+	"splitright":      true,
+	"statusformatl":   "$(filename) $(modified)($(line),$(col)) $(status.paste)| ft:$(opt:filetype) | $(opt:fileformat) | $(opt:encoding)",
+	"statusformatr":   "$(bind:ToggleKeyMenu): bindings, $(bind:ToggleHelp): help",
+	"statusline":      true,
+	"syntax":          true,
+	"tabmovement":     false,
+	"tabsize":         float64(4),
+	"tabstospaces":    false,
+	"useprimary":      true,
+	"wordwrap":        false,
+}
+
+// a list of settings that should only be globally modified and their
+// default values
+var DefaultGlobalOnlySettings = map[string]interface{}{
+	"autosave":       float64(0),
+	"clipboard":      "external",
+	"colorscheme":    "default",
+	"divchars":       "|-",
+	"divreverse":     true,
+	"fakecursor":     false,
+	"helpsplit":      "hsplit",
+	"infobar":        true,
+	"keymenu":        false,
+	"mouse":          true,
+	"multiopen":      "tab",
+	"parsecursor":    false,
+	"paste":          false,
+	"pluginchannels": []string{"https://raw.githubusercontent.com/micro-editor/plugin-channel/master/channel.json"},
+	"pluginrepos":    []string{},
+	"savehistory":    true,
+	"scrollbarchar":  "|",
+	"sucmd":          "sudo",
+	"tabhighlight":   false,
+	"tabreverse":     true,
+	"xterm":          false,
+}
+
+// a list of settings that should never be globally modified
+var LocalSettings = []string{
+	"filetype",
+	"readonly",
+}
 
 var (
 	ErrInvalidOption = errors.New("Invalid option")
@@ -33,29 +148,76 @@ var (
 	// ModifiedSettings is a map of settings which should be written to disk
 	// because they have been modified by the user in this session
 	ModifiedSettings map[string]bool
+
+	// VolatileSettings is a map of settings which should not be written to disk
+	// because they have been temporarily set for this session only
+	VolatileSettings map[string]bool
 )
 
 func init() {
 	ModifiedSettings = make(map[string]bool)
-	parsedSettings = make(map[string]interface{})
+	VolatileSettings = make(map[string]bool)
 }
 
-// Options with validators
-var optionValidators = map[string]optionValidator{
-	"autosave":     validateNonNegativeValue,
-	"clipboard":    validateClipboard,
-	"tabsize":      validatePositiveValue,
-	"scrollmargin": validateNonNegativeValue,
-	"scrollspeed":  validateNonNegativeValue,
-	"colorscheme":  validateColorscheme,
-	"colorcolumn":  validateNonNegativeValue,
-	"fileformat":   validateLineEnding,
-	"encoding":     validateEncoding,
-	"multiopen":    validateMultiOpen,
-	"reload":       validateReload,
+func validateParsedSettings() error {
+	var err error
+	defaults := DefaultAllSettings()
+	for k, v := range parsedSettings {
+		if strings.HasPrefix(reflect.TypeOf(v).String(), "map") {
+			if strings.HasPrefix(k, "ft:") {
+				for k1, v1 := range v.(map[string]interface{}) {
+					if _, ok := defaults[k1]; ok {
+						if e := verifySetting(k1, v1, defaults[k1]); e != nil {
+							err = e
+							parsedSettings[k].(map[string]interface{})[k1] = defaults[k1]
+							continue
+						}
+					}
+				}
+			} else {
+				if _, e := glob.Compile(k); e != nil {
+					err = errors.New("Error with glob setting " + k + ": " + e.Error())
+					delete(parsedSettings, k)
+					continue
+				}
+				for k1, v1 := range v.(map[string]interface{}) {
+					if _, ok := defaults[k1]; ok {
+						if e := verifySetting(k1, v1, defaults[k1]); e != nil {
+							err = e
+							parsedSettings[k].(map[string]interface{})[k1] = defaults[k1]
+							continue
+						}
+					}
+				}
+			}
+			continue
+		}
+
+		if k == "autosave" {
+			// if autosave is a boolean convert it to float
+			s, ok := v.(bool)
+			if ok {
+				if s {
+					parsedSettings["autosave"] = 8.0
+				} else {
+					parsedSettings["autosave"] = 0.0
+				}
+			}
+			continue
+		}
+		if _, ok := defaults[k]; ok {
+			if e := verifySetting(k, v, defaults[k]); e != nil {
+				err = e
+				parsedSettings[k] = defaults[k]
+				continue
+			}
+		}
+	}
+	return err
 }
 
 func ReadSettings() error {
+	parsedSettings = make(map[string]interface{})
 	filename := filepath.Join(ConfigDir, "settings.json")
 	if _, e := os.Stat(filename); e == nil {
 		input, err := ioutil.ReadFile(filename)
@@ -70,46 +232,54 @@ func ReadSettings() error {
 				settingsParseError = true
 				return errors.New("Error reading settings.json: " + err.Error())
 			}
-
-			// check if autosave is a boolean and convert it to float if so
-			if v, ok := parsedSettings["autosave"]; ok {
-				s, ok := v.(bool)
-				if ok {
-					if s {
-						parsedSettings["autosave"] = 8.0
-					} else {
-						parsedSettings["autosave"] = 0.0
-					}
-				}
+			err = validateParsedSettings()
+			if err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-func verifySetting(option string, value reflect.Type, def reflect.Type) bool {
+func ParsedSettings() map[string]interface{} {
+	s := make(map[string]interface{})
+	for k, v := range parsedSettings {
+		s[k] = v
+	}
+	return s
+}
+
+func verifySetting(option string, value interface{}, def interface{}) error {
 	var interfaceArr []interface{}
+	valType := reflect.TypeOf(value)
+	defType := reflect.TypeOf(def)
+	assignable := false
+
 	switch option {
 	case "pluginrepos", "pluginchannels":
-		return value.AssignableTo(reflect.TypeOf(interfaceArr))
+		assignable = valType.AssignableTo(reflect.TypeOf(interfaceArr))
 	default:
-		return def.AssignableTo(value)
+		assignable = defType.AssignableTo(valType)
 	}
+	if !assignable {
+		return fmt.Errorf("Error: setting '%s' has incorrect type (%s), using default value: %v (%s)", option, valType, def, defType)
+	}
+
+	if err := OptionIsValid(option, value); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // InitGlobalSettings initializes the options map and sets all options to their default values
 // Must be called after ReadSettings
 func InitGlobalSettings() error {
 	var err error
-	GlobalSettings = DefaultGlobalSettings()
+	GlobalSettings = DefaultAllSettings()
 
 	for k, v := range parsedSettings {
 		if !strings.HasPrefix(reflect.TypeOf(v).String(), "map") {
-			if _, ok := GlobalSettings[k]; ok && !verifySetting(k, reflect.TypeOf(v), reflect.TypeOf(GlobalSettings[k])) {
-				err = fmt.Errorf("Global Error: setting '%s' has incorrect type (%s), using default value: %v (%s)", k, reflect.TypeOf(v), GlobalSettings[k], reflect.TypeOf(GlobalSettings[k]))
-				continue
-			}
-
 			GlobalSettings[k] = v
 		}
 	}
@@ -119,40 +289,25 @@ func InitGlobalSettings() error {
 // InitLocalSettings scans the json in settings.json and sets the options locally based
 // on whether the filetype or path matches ft or glob local settings
 // Must be called after ReadSettings
-func InitLocalSettings(settings map[string]interface{}, path string) error {
-	var parseError error
+func InitLocalSettings(settings map[string]interface{}, path string) {
 	for k, v := range parsedSettings {
 		if strings.HasPrefix(reflect.TypeOf(v).String(), "map") {
 			if strings.HasPrefix(k, "ft:") {
 				if settings["filetype"].(string) == k[3:] {
 					for k1, v1 := range v.(map[string]interface{}) {
-						if _, ok := settings[k1]; ok && !verifySetting(k1, reflect.TypeOf(v1), reflect.TypeOf(settings[k1])) {
-							parseError = fmt.Errorf("Error: setting '%s' has incorrect type (%s), using default value: %v (%s)", k, reflect.TypeOf(v1), settings[k1], reflect.TypeOf(settings[k1]))
-							continue
-						}
 						settings[k1] = v1
 					}
 				}
 			} else {
-				g, err := glob.Compile(k)
-				if err != nil {
-					parseError = errors.New("Error with glob setting " + k + ": " + err.Error())
-					continue
-				}
-
+				g, _ := glob.Compile(k)
 				if g.MatchString(path) {
 					for k1, v1 := range v.(map[string]interface{}) {
-						if _, ok := settings[k1]; ok && !verifySetting(k1, reflect.TypeOf(v1), reflect.TypeOf(settings[k1])) {
-							parseError = fmt.Errorf("Error: setting '%s' has incorrect type (%s), using default value: %v (%s)", k, reflect.TypeOf(v1), settings[k1], reflect.TypeOf(settings[k1]))
-							continue
-						}
 						settings[k1] = v1
 					}
 				}
 			}
 		}
 	}
-	return parseError
 }
 
 // WriteSettings writes the settings to the specified filename as JSON
@@ -167,13 +322,14 @@ func WriteSettings(filename string) error {
 
 	var err error
 	if _, e := os.Stat(ConfigDir); e == nil {
-		defaults := DefaultGlobalSettings()
+		defaults := DefaultAllSettings()
 
 		// remove any options froms parsedSettings that have since been marked as default
 		for k, v := range parsedSettings {
 			if !strings.HasPrefix(reflect.TypeOf(v).String(), "map") {
 				cur, okcur := GlobalSettings[k]
-				if def, ok := defaults[k]; ok && okcur && reflect.DeepEqual(cur, def) {
+				_, vol := VolatileSettings[k]
+				if def, ok := defaults[k]; ok && okcur && !vol && reflect.DeepEqual(cur, def) {
 					delete(parsedSettings, k)
 				}
 			}
@@ -201,7 +357,7 @@ func OverwriteSettings(filename string) error {
 
 	var err error
 	if _, e := os.Stat(ConfigDir); e == nil {
-		defaults := DefaultGlobalSettings()
+		defaults := DefaultAllSettings()
 		for k, v := range GlobalSettings {
 			if def, ok := defaults[k]; !ok || !reflect.DeepEqual(v, def) {
 				if _, wr := ModifiedSettings[k]; wr {
@@ -218,18 +374,7 @@ func OverwriteSettings(filename string) error {
 
 // RegisterCommonOptionPlug creates a new option (called pl.name). This is meant to be called by plugins to add options.
 func RegisterCommonOptionPlug(pl string, name string, defaultvalue interface{}) error {
-	name = pl + "." + name
-	if _, ok := GlobalSettings[name]; !ok {
-		defaultCommonSettings[name] = defaultvalue
-		GlobalSettings[name] = defaultvalue
-		err := WriteSettings(filepath.Join(ConfigDir, "settings.json"))
-		if err != nil {
-			return errors.New("Error writing settings.json file: " + err.Error())
-		}
-	} else {
-		defaultCommonSettings[name] = defaultvalue
-	}
-	return nil
+	return RegisterCommonOption(pl+"."+name, defaultvalue)
 }
 
 // RegisterGlobalOptionPlug creates a new global-only option (named pl.name)
@@ -239,31 +384,19 @@ func RegisterGlobalOptionPlug(pl string, name string, defaultvalue interface{}) 
 
 // RegisterCommonOption creates a new option
 func RegisterCommonOption(name string, defaultvalue interface{}) error {
-	if v, ok := GlobalSettings[name]; !ok {
-		defaultCommonSettings[name] = defaultvalue
+	if _, ok := GlobalSettings[name]; !ok {
 		GlobalSettings[name] = defaultvalue
-		err := WriteSettings(filepath.Join(ConfigDir, "settings.json"))
-		if err != nil {
-			return errors.New("Error writing settings.json file: " + err.Error())
-		}
-	} else {
-		defaultCommonSettings[name] = v
 	}
+	defaultCommonSettings[name] = defaultvalue
 	return nil
 }
 
 // RegisterGlobalOption creates a new global-only option
 func RegisterGlobalOption(name string, defaultvalue interface{}) error {
-	if v, ok := GlobalSettings[name]; !ok {
-		DefaultGlobalOnlySettings[name] = defaultvalue
+	if _, ok := GlobalSettings[name]; !ok {
 		GlobalSettings[name] = defaultvalue
-		err := WriteSettings(filepath.Join(ConfigDir, "settings.json"))
-		if err != nil {
-			return errors.New("Error writing settings.json file: " + err.Error())
-		}
-	} else {
-		DefaultGlobalOnlySettings[name] = v
 	}
+	DefaultGlobalOnlySettings[name] = defaultvalue
 	return nil
 }
 
@@ -272,51 +405,11 @@ func GetGlobalOption(name string) interface{} {
 	return GlobalSettings[name]
 }
 
-var defaultCommonSettings = map[string]interface{}{
-	"autoindent":     true,
-	"autosu":         false,
-	"backup":         true,
-	"backupdir":      "",
-	"basename":       false,
-	"colorcolumn":    float64(0),
-	"cursorline":     true,
-	"diffgutter":     false,
-	"encoding":       "utf-8",
-	"eofnewline":     true,
-	"fastdirty":      false,
-	"fileformat":     "unix",
-	"filetype":       "unknown",
-	"hlsearch":       false,
-	"incsearch":      true,
-	"ignorecase":     true,
-	"indentchar":     " ",
-	"keepautoindent": false,
-	"matchbrace":     true,
-	"mkparents":      false,
-	"permbackup":     false,
-	"readonly":       false,
-	"reload":         "prompt",
-	"rmtrailingws":   false,
-	"ruler":          true,
-	"relativeruler":  false,
-	"savecursor":     false,
-	"saveundo":       false,
-	"scrollbar":      false,
-	"scrollmargin":   float64(3),
-	"scrollspeed":    float64(2),
-	"smartpaste":     true,
-	"softwrap":       false,
-	"splitbottom":    true,
-	"splitright":     true,
-	"statusformatl":  "$(filename) $(modified)($(line),$(col)) $(status.paste)| ft:$(opt:filetype) | $(opt:fileformat) | $(opt:encoding)",
-	"statusformatr":  "$(bind:ToggleKeyMenu): bindings, $(bind:ToggleHelp): help",
-	"statusline":     true,
-	"syntax":         true,
-	"tabmovement":    false,
-	"tabsize":        float64(4),
-	"tabstospaces":   false,
-	"useprimary":     true,
-	"wordwrap":       false,
+func defaultFileFormat() string {
+	if runtime.GOOS == "windows" {
+		return "dos"
+	}
+	return "unix"
 }
 
 func GetInfoBarOffset() int {
@@ -330,8 +423,8 @@ func GetInfoBarOffset() int {
 	return offset
 }
 
-// DefaultCommonSettings returns the default global settings for micro
-// Note that colorscheme is a global only option
+// DefaultCommonSettings returns a map of all common buffer settings
+// and their default values
 func DefaultCommonSettings() map[string]interface{} {
 	commonsettings := make(map[string]interface{})
 	for k, v := range defaultCommonSettings {
@@ -340,52 +433,8 @@ func DefaultCommonSettings() map[string]interface{} {
 	return commonsettings
 }
 
-// a list of settings that should only be globally modified and their
-// default values
-var DefaultGlobalOnlySettings = map[string]interface{}{
-	"autosave":       float64(0),
-	"clipboard":      "external",
-	"colorscheme":    "default",
-	"divchars":       "|-",
-	"divreverse":     true,
-	"fakecursor":     false,
-	"infobar":        true,
-	"keymenu":        false,
-	"mouse":          true,
-	"multiopen":      "tab",
-	"parsecursor":    false,
-	"paste":          false,
-	"pluginchannels": []string{"https://raw.githubusercontent.com/micro-editor/plugin-channel/master/channel.json"},
-	"pluginrepos":    []string{},
-	"savehistory":    true,
-	"scrollbarchar":  "|",
-	"sucmd":          "sudo",
-	"tabhighlight":   false,
-	"tabreverse":     true,
-	"xterm":          false,
-}
-
-// a list of settings that should never be globally modified
-var LocalSettings = []string{
-	"filetype",
-	"readonly",
-}
-
-// DefaultGlobalSettings returns the default global settings for micro
-// Note that colorscheme is a global only option
-func DefaultGlobalSettings() map[string]interface{} {
-	globalsettings := make(map[string]interface{})
-	for k, v := range defaultCommonSettings {
-		globalsettings[k] = v
-	}
-	for k, v := range DefaultGlobalOnlySettings {
-		globalsettings[k] = v
-	}
-	return globalsettings
-}
-
-// DefaultAllSettings returns a map of all settings and their
-// default values (both common and global settings)
+// DefaultAllSettings returns a map of all common buffer & global-only settings
+// and their default values
 func DefaultAllSettings() map[string]interface{} {
 	allsettings := make(map[string]interface{})
 	for k, v := range defaultCommonSettings {
@@ -410,18 +459,15 @@ func GetNativeValue(option string, realValue interface{}, value string) (interfa
 	} else if kind == reflect.String {
 		native = value
 	} else if kind == reflect.Float64 {
-		i, err := strconv.Atoi(value)
+		f, err := strconv.ParseFloat(value, 64)
 		if err != nil {
 			return nil, ErrInvalidValue
 		}
-		native = float64(i)
+		native = f
 	} else {
 		return nil, ErrInvalidValue
 	}
 
-	if err := OptionIsValid(option, native); err != nil {
-		return nil, err
-	}
 	return native, nil
 }
 
@@ -437,13 +483,13 @@ func OptionIsValid(option string, value interface{}) error {
 // Option validators
 
 func validatePositiveValue(option string, value interface{}) error {
-	tabsize, ok := value.(float64)
+	nativeValue, ok := value.(float64)
 
 	if !ok {
 		return errors.New("Expected numeric type for " + option)
 	}
 
-	if tabsize < 1 {
+	if nativeValue < 1 {
 		return errors.New(option + " must be greater than 0")
 	}
 
@@ -464,6 +510,26 @@ func validateNonNegativeValue(option string, value interface{}) error {
 	return nil
 }
 
+func validateChoice(option string, value interface{}) error {
+	if choices, ok := OptionChoices[option]; ok {
+		val, ok := value.(string)
+		if !ok {
+			return errors.New("Expected string type for " + option)
+		}
+
+		for _, v := range choices {
+			if val == v {
+				return nil
+			}
+		}
+
+		choicesStr := strings.Join(choices, ", ")
+		return errors.New(option + " must be one of: " + choicesStr)
+	}
+
+	return errors.New("Option has no pre-defined choices")
+}
+
 func validateColorscheme(option string, value interface{}) error {
 	colorscheme, ok := value.(string)
 
@@ -478,69 +544,7 @@ func validateColorscheme(option string, value interface{}) error {
 	return nil
 }
 
-func validateClipboard(option string, value interface{}) error {
-	val, ok := value.(string)
-
-	if !ok {
-		return errors.New("Expected string type for clipboard")
-	}
-
-	switch val {
-	case "internal", "external", "terminal":
-	default:
-		return errors.New(option + " must be 'internal', 'external', or 'terminal'")
-	}
-
-	return nil
-}
-
-func validateLineEnding(option string, value interface{}) error {
-	endingType, ok := value.(string)
-
-	if !ok {
-		return errors.New("Expected string type for file format")
-	}
-
-	if endingType != "unix" && endingType != "dos" {
-		return errors.New("File format must be either 'unix' or 'dos'")
-	}
-
-	return nil
-}
-
 func validateEncoding(option string, value interface{}) error {
 	_, err := htmlindex.Get(value.(string))
 	return err
-}
-
-func validateMultiOpen(option string, value interface{}) error {
-	val, ok := value.(string)
-
-	if !ok {
-		return errors.New("Expected string type for multiopen")
-	}
-
-	switch val {
-	case "tab", "hsplit", "vsplit":
-	default:
-		return errors.New(option + " must be 'tab', 'hsplit', or 'vsplit'")
-	}
-
-	return nil
-}
-
-func validateReload(option string, value interface{}) error {
-	val, ok := value.(string)
-
-	if !ok {
-		return errors.New("Expected string type for reload")
-	}
-
-	switch val {
-	case "prompt", "auto", "disabled":
-	default:
-		return errors.New(option + " must be 'prompt', 'auto' or 'disabled'")
-	}
-
-	return nil
 }
