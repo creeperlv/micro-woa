@@ -31,4 +31,5 @@ hub release edit nightly \
     --attach "binaries/micro-$1-netbsd64.tar.gz" \
     --attach "binaries/micro-$1-netbsd32.tar.gz" \
     --attach "binaries/micro-$1-win64.zip" \
+    --attach "binaries/micro-$1-winarm64.zip" \
     --attach "binaries/micro-$1-win32.zip"
